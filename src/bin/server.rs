@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
 use simple_chat::{sleep, Message, BUFSIZE};
@@ -89,10 +89,16 @@ impl Server {
                 match stream.write(&encoded) {
                     Ok(_bytes_written) => {
                         stream.flush()?;
-                        dbg!("Successfully wrote {_bytes_written} bytes to {addr}");
+                        dbg!(format!(
+                            "Successfully wrote {_bytes_written} bytes to {addr}"
+                        ));
+                    }
+                    Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                        println!("Broken pipe. Dropping connection to peer at {addr}");
+                        dropped_connections.push(*addr);
                     }
                     Err(e) => {
-                        println!("Error {e} trying to write to client stream. Adding to dropped connections.");
+                        println!("Error '{}: {e}' trying to write to client stream. Adding to dropped connections.", e.kind());
                         dropped_connections.push(*addr);
                     }
                 }

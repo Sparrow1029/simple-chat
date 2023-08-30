@@ -89,6 +89,7 @@ impl Client {
         thread::spawn(move || loop {
             let mut buffer = String::new();
             stdin().read_line(&mut buffer).unwrap();
+            print!("\r\x1b[K\x1b[A\r\x1b[K"); // Clear the line that was just written
             tx.send(buffer).unwrap();
         });
         rx
