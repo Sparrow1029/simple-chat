@@ -39,7 +39,7 @@ impl Server {
                 }
             }
             self.recv_messages()?;
-            let keys_to_drop = self.send_messages().expect("error sending messages");
+            let keys_to_drop = self.send_messages()?;
             self.drop_connections(&keys_to_drop);
         }
     }
@@ -60,19 +60,21 @@ impl Server {
     }
 
     fn recv_messages(&mut self) -> Result<()> {
-        // println!("Checking for messages...");
-        for (_addr, stream) in self.clients.iter_mut() {
+        let mut dropped_connections = vec![];
+        for (addr, stream) in self.clients.iter_mut() {
             let mut buf: [u8; BUFSIZE] = [0; BUFSIZE];
             if let Ok(bytes_read) = stream.read(&mut buf) {
                 if bytes_read > 0 {
-                    // println!("Read {bytes_read} bytes from {addr}");
                     let msg = Message::try_from(&buf[..])?;
-                    // prinln!("Recieved {msg:?}");
                     self.msg_q.borrow_mut().push_back(msg);
                     stream.flush()?;
+                } else if bytes_read == 0 {
+                    eprintln!("Connection to {addr} closed.");
+                    dropped_connections.push(*addr)
                 }
             }
         }
+        self.drop_connections(&dropped_connections);
         Ok(())
     }
 
@@ -89,9 +91,7 @@ impl Server {
                 match stream.write(&encoded) {
                     Ok(_bytes_written) => {
                         stream.flush()?;
-                        dbg!(format!(
-                            "Successfully wrote {_bytes_written} bytes to {addr}"
-                        ));
+                        dbg!(_bytes_written, addr);
                     }
                     Err(e) if e.kind() == ErrorKind::BrokenPipe => {
                         println!("Broken pipe. Dropping connection to peer at {addr}");
