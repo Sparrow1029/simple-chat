@@ -3,14 +3,12 @@ use serde::{Deserialize, Serialize};
 // use std::borrow::BorrowMut;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
-use std::io::{
-    stdin,
-    BufRead,
-    // ErrorKind,
-    Read,
-    Write,
-};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::io::{stdin, BufRead, ErrorKind, Read, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::{thread, time};
+
+const BUFSIZE: usize = 8 * 1024; // 8 KiB
 
 #[derive(Debug)]
 struct Server {
@@ -41,9 +39,7 @@ impl Server {
                     _ = self.handle_connection(socket_addr, stream);
                 }
                 _ => {
-                    println!("No new connections found...");
-                    let wait_1s = std::time::Duration::from_secs(1);
-                    std::thread::sleep(wait_1s);
+                    sleep(100);
                 }
             }
             _ = self.recv_messages();
@@ -68,15 +64,16 @@ impl Server {
     }
 
     fn recv_messages(&mut self) -> Result<()> {
-        println!("Checking for messages...");
+        // println!("Checking for messages...");
         for (addr, stream) in self.clients.iter_mut() {
-            let mut buf: [u8; 512] = [0; 512];
+            let mut buf: [u8; BUFSIZE] = [0; BUFSIZE];
             if let Ok(bytes_read) = stream.read(&mut buf) {
                 if bytes_read > 0 {
-                    println!("Read {bytes_read} bytes from {addr}");
-                    let msg = bincode::deserialize_from(&buf[..])?;
-                    println!("Recieved {msg:?}");
+                    // println!("Read {bytes_read} bytes from {addr}");
+                    let msg = Message::try_from(&buf[..])?;
+                    // prinln!("Recieved {msg:?}");
                     self.msg_q.borrow_mut().push_back(msg);
+                    stream.flush()?;
                 }
             }
         }
@@ -89,13 +86,14 @@ impl Server {
         // Have to access self.msg_q through RefCell (interior mutability)
         // to allow borrowing fields on self mutably more than once.
         // It should be safe because we are mutating two _separate_ fields of `self`
-        println!("in send_messages: {}", self.msg_q.borrow().len());
+        // println!("in send_messages: {}", self.msg_q.borrow().len());
         while let Some(msg) = self.msg_q.borrow_mut().pop_front() {
             for (addr, stream) in self.clients.iter_mut() {
-                let encoded = bincode::serialize(&msg.content)?;
+                let encoded = msg.serialize()?;
                 match stream.write(&encoded) {
                     Ok(bytes_written) => {
-                        println!("Successfully wrote {bytes_written} bytes to {addr}");
+                        stream.flush()?;
+                        // println!("Successfully wrote {bytes_written} bytes to {addr}");
                     }
                     Err(e) => {
                         println!("Error {e} trying to write to client stream. Adding to dropped connections.");
@@ -123,16 +121,17 @@ impl Client {
         _ = stream.set_write_timeout(Some(timeout));
         let username = loop {
             println!("Enter a username: ");
-            match Client::get_content_from_stdin() {
-                Some(content) => {
-                    if content.len() > 1 {
-                        break String::from_utf8(content)
-                            .expect("error converting &[u8] to String");
+            let mut buf = String::new();
+            let mut handle = stdin().lock();
+            match handle.read_line(&mut buf) {
+                Ok(bytes_read) => {
+                    if bytes_read > 1 {
+                        break buf;
                     } else {
                         continue;
                     }
                 }
-                None => continue,
+                _ => continue,
             }
         };
         Ok(Client {
@@ -142,62 +141,84 @@ impl Client {
     }
 
     fn run(&mut self) {
+        let stdin_channel = self.spawn_stdin_channel();
         loop {
-            if let Some(content) = Client::get_content_from_stdin() {
+            // eprintln!("Checking for new stdin...");
+            if let Some(content) = self.get_content_from_stdin_channel(&stdin_channel) {
                 let msg = Message {
                     username: self.username.clone(),
                     content: content.into(),
                 };
-                let encoded = bincode::serialize(&msg).expect("Error serializing message");
-                self.send_message(&encoded).expect("error sending message");
-                println!("sent message...");
+                self.send_message(msg).expect("error sending message");
+                // println!("sent message...");
             }
+            // eprintln!("Waiting to receive messages...");
             self.recv_messages().expect("error receiving messages");
         }
     }
 
-    fn send_message(&mut self, content: &[u8]) -> Result<()> {
-        let msg = Message {
-            username: self.username.clone(),
-            content: content.into(),
-        };
-        let encoded = bincode::serialize(&msg)?;
+    fn send_message(&mut self, msg: Message) -> Result<()> {
+        let encoded = msg.serialize()?;
         self.stream.write(&encoded)?;
+        self.stream.flush()?;
 
         Ok(())
     }
 
     fn recv_messages(&mut self) -> Result<()> {
-        let mut buf: [u8; 512] = [0; 512];
+        let mut buf: [u8; BUFSIZE] = [0; BUFSIZE];
         match self.stream.read(&mut buf) {
             Ok(bytes_read) => {
-                println!("Read bytes from stream...");
+                // println!("Read bytes from stream...");
                 if bytes_read > 0 {
-                    let msg: Message = bincode::deserialize(&buf)?;
+                    let msg = Message::try_from(&buf[..])?;
+                    // eprintln!("MESSAGE: {:?}", &msg);
+
                     let username = msg.username.trim();
                     let content = String::from_utf8(msg.content)?;
                     println!("{username}: {content}");
+
+                    // self.stream.flush()?;
                 }
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                return Ok(());
             }
             Err(e) => {
                 println!("error encountered: {} - {e}", e.kind());
-                return Ok(());
             }
         }
         Ok(())
     }
 
-    fn get_content_from_stdin() -> Option<Vec<u8>> {
-        let mut buf = String::new();
-        let stdin = stdin();
-        let mut handle = stdin.lock();
-        let bytes_read = handle
-            .read_line(&mut buf)
-            .expect("error reading from stdin");
-        if bytes_read > 0 {
-            return Some(buf.into());
+    fn spawn_stdin_channel(&self) -> Receiver<String> {
+        let (tx, rx) = mpsc::channel::<String>();
+        thread::spawn(move || loop {
+            let mut buffer = String::new();
+            stdin().read_line(&mut buffer).unwrap();
+            tx.send(buffer).unwrap();
+        });
+        rx
+    }
+
+    fn get_content_from_stdin_channel(&self, rx: &Receiver<String>) -> Option<Vec<u8>> {
+        match rx.try_recv() {
+            Ok(content) => {
+                // println!("Received: {}", key);
+                return Some(content.trim().into());
+            }
+            Err(TryRecvError::Empty) => {} //println!("Channel empty"),
+            Err(TryRecvError::Disconnected) => panic!("Channel disconnected"),
         }
+        // sleep(1000);
         None
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        eprintln!("Shutting down tcpstream");
+        _ = self.stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -207,9 +228,28 @@ struct Message {
     content: Vec<u8>,
 }
 
+impl Message {
+    fn serialize(&self) -> bincode::Result<Vec<u8>> {
+        bincode::serialize(self)
+    }
+}
+
+impl<'a> TryFrom<&'a [u8]> for Message {
+    type Error = Box<bincode::ErrorKind>;
+
+    fn try_from(value: &'a [u8]) -> bincode::Result<Self> {
+        bincode::deserialize(value)
+    }
+}
+
+fn sleep(millis: u64) {
+    let duration = time::Duration::from_millis(millis);
+    thread::sleep(duration);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = String::from("Usage: simple_chat [server <addr>] [client]");
+    let usage = String::from("Usage: simple_chat [server <addr:port>] [client <addr:port>]");
     match args.len() {
         1 | 2 => println!("{usage}"),
         3 => {
