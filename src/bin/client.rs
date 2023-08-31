@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use simple_chat::{Message, BUFSIZE};
 use std::{
     io::{stdin, BufRead, ErrorKind, Read, Write},
@@ -15,11 +15,21 @@ struct Client {
 
 impl Client {
     fn connect(addr: &str) -> Result<Client> {
+        let username = Client::get_username();
+        let connect_msg = Message::new(&username, b"Joined the chat");
+
+        let timeout = std::time::Duration::from_millis(100);
         let socket: SocketAddr = addr.parse()?;
         let stream = TcpStream::connect(socket)?;
-        let timeout = std::time::Duration::from_millis(100);
         stream.set_nonblocking(true)?;
-        _ = stream.set_write_timeout(Some(timeout));
+        stream.set_write_timeout(Some(timeout))?;
+
+        let mut client = Client { stream, username };
+        client.send_message(connect_msg)?;
+        Ok(client)
+    }
+
+    fn get_username() -> String {
         let username = loop {
             println!("Enter a username: ");
             let mut buf = String::new();
@@ -35,10 +45,7 @@ impl Client {
                 _ => continue,
             }
         };
-        Ok(Client {
-            stream,
-            username: username.trim().into(),
-        })
+        username.trim().into()
     }
 
     fn run(&mut self) -> Result<()> {
@@ -72,6 +79,8 @@ impl Client {
                     let username = msg.username.trim();
                     let content = String::from_utf8(msg.content)?;
                     println!("{username}: {content}");
+                } else if bytes_read == 0 {
+                    return Err(anyhow!("Broken pipe - server disconnected."));
                 }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {

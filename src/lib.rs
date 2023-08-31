@@ -11,6 +11,13 @@ pub struct Message {
 }
 
 impl Message {
+    pub fn new(username: &str, content: &[u8]) -> Self {
+        Message {
+            username: username.into(),
+            content: content.into(),
+        }
+    }
+
     pub fn serialize(&self) -> bincode::Result<Vec<u8>> {
         bincode::serialize(self)
     }

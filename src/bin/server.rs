@@ -117,6 +117,6 @@ fn main() -> Result<()> {
     }
     let mut server = Server::create(&args[1])?;
     dbg!("Created server {:?}", &server);
-    server.run();
+    server.run()?;
     Ok(())
 }
