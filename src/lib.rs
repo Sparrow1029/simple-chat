@@ -35,3 +35,10 @@ pub fn sleep(millis: u64) {
     let duration = time::Duration::from_millis(millis);
     thread::sleep(duration);
 }
+
+#[macro_export]
+macro_rules! lock {
+    ($mutex:expr) => {
+        $mutex.lock().expect("error acquiring lock")
+    };
+}
